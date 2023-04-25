@@ -1,0 +1,49 @@
+/** 
+ * Copyright (C) 2023 saybur
+ * 
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version. 
+ * 
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details. 
+ * 
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+**/
+
+#pragma once
+#ifdef ENABLE_AUDIO_OUTPUT
+
+#include <Arduino.h>
+
+// audio subsystem DMA channels
+#define SOUND_DMA_CHA 6
+#define SOUND_DMA_CHB 7
+
+// size of the two audio sample buffers, in bytes
+// these must be divisible by 512
+#define AUDIO_BUFFER_SIZE 8192
+
+// performs initial setup of the audio subsystem
+void audio_setup();
+
+// handler for DMA interrupts
+// This is called from scsi_dma_irq() in scsi_accel_rp2040; this is obviously
+// a silly way to handle things, but every time I tried to use the normal
+// irq_add_shared_handler() the platform would lock up. There was issue #724
+// but I think that has been handled in this release? At any rate, to work
+// around the problem the above exclusive handler will delegate to this
+// function if its mask is not matched.
+void audio_dma_irq();
+
+// if non-null, indicates a buffer that should be filled
+uint8_t* audio_buffer();
+
+// callback after the above buffer has been filled
+void audio_buffer_filled();
+
+#endif // ENABLE_AUDIO_OUTPUT

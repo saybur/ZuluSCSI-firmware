@@ -27,6 +27,8 @@
 #include <assert.h>
 #include <hardware/gpio.h>
 #include <hardware/uart.h>
+#include <hardware/pll.h>
+#include <hardware/clocks.h>
 #include <hardware/spi.h>
 #include <hardware/flash.h>
 #include <hardware/structs/xip_ctrl.h>
@@ -34,6 +36,7 @@
 #include <platform/mbed_error.h>
 #include <multicore.h>
 #include <USB/PluggableUSBSerial.h>
+#include "audio.h"
 
 extern "C" {
 
@@ -61,6 +64,43 @@ static void gpio_conf(uint gpio, enum gpio_function fn, bool pullup, bool pulldo
         padsbank0_hw->io[gpio] |= PADS_BANK0_GPIO0_SLEWFAST_BITS;
     }
 }
+
+#ifdef ENABLE_AUDIO_OUTPUT
+// Increases clk_sys and clk_peri to 135.428571MHz at runtime to support
+// division to audio output rates. Invoke before anything is using clk_peri
+// except for the logging UART, which is handled below.
+static void reclock_for_audio() {
+    // ensure UART is fully drained before we mess up its clock
+    uart_tx_wait_blocking(uart0);
+    // switch clk_sys and clk_peri to pll_usb
+    // see code in 2.15.6.1 of the datasheet for useful comments
+    clock_configure(clk_sys,
+            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+            48 * MHZ,
+            48 * MHZ);
+    clock_configure(clk_peri,
+            0,
+            CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_USB,
+            48 * MHZ,
+            48 * MHZ);
+    // reset PLL for 135.428571MHz
+    pll_init(pll_sys, 1, 948000000, 7, 1);
+    // switch clocks back to pll_sys
+    clock_configure(clk_sys,
+            CLOCKS_CLK_SYS_CTRL_SRC_VALUE_CLKSRC_CLK_SYS_AUX,
+            CLOCKS_CLK_SYS_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+            135428571,
+            135428571);
+    clock_configure(clk_peri,
+            0,
+            CLOCKS_CLK_PERI_CTRL_AUXSRC_VALUE_CLKSRC_PLL_SYS,
+            135428571,
+            135428571);
+    // reset UART for the new clock speed
+    uart_init(uart0, 1000000);
+}
+#endif
 
 void platform_init()
 {
@@ -116,6 +156,12 @@ void platform_init()
     logmsg ("SCSI termination is handled by a hardware jumper");
 #endif
 
+#ifdef ENABLE_AUDIO_OUTPUT
+    logmsg("SP/DIF audio to expansion header enabled");
+    logmsg("-- Overclocking to 135.428571MHz");
+    reclock_for_audio();
+#endif
+
     // Get flash chip size
     uint8_t cmd_read_jedec_id[4] = {0x9f, 0, 0, 0};
     uint8_t response_jedec[4] = {0};
@@ -138,11 +184,17 @@ void platform_init()
     // LED pin
     gpio_conf(LED_PIN,        GPIO_FUNC_SIO, false,false, true,  false, false);
 
+#ifndef ENABLE_AUDIO_OUTPUT
 #ifdef GPIO_I2C_SDA
     // I2C pins
     //        pin             function       pup   pdown  out    state fast
     gpio_conf(GPIO_I2C_SCL,   GPIO_FUNC_I2C, true,false, false,  true, true);
     gpio_conf(GPIO_I2C_SDA,   GPIO_FUNC_I2C, true,false, false,  true, true);
+#endif
+#else
+    //        pin             function       pup   pdown  out    state fast
+    gpio_conf(GPIO_EXP_AUDIO, GPIO_FUNC_SPI, true,false, false,  true, true);
+    // configuration of corresponding SPI unit occurs in audio_setup()
 #endif
 }
 
@@ -251,6 +303,11 @@ void platform_late_init()
         gpio_conf(SCSI_IN_ACK,    GPIO_FUNC_SIO, true, false, false, true, false);
         gpio_conf(SCSI_IN_ATN,    GPIO_FUNC_SIO, true, false, false, true, false);
         gpio_conf(SCSI_IN_RST,    GPIO_FUNC_SIO, true, false, false, true, false);
+
+#ifdef ENABLE_AUDIO_OUTPUT
+        // one-time control setup for DMA channels, second core, yada yada
+        audio_setup();
+#endif
     }
     else
     {
@@ -470,6 +527,8 @@ static void watchdog_callback(unsigned alarm_num)
     hardware_alarm_set_target(3, delayed_by_ms(get_absolute_time(), 1000));
 }
 
+static uint32_t audioPos = 0;
+
 // This function can be used to periodically reset watchdog timer for crash handling.
 // It can also be left empty if the platform does not use a watchdog timer.
 void platform_reset_watchdog()
@@ -485,6 +544,21 @@ void platform_reset_watchdog()
     }
 
     usb_log_poll();
+
+#ifdef ENABLE_AUDIO_OUTPUT
+    // misuse this platform call to read audio data, if needed
+    uint8_t* audiobuf = audio_buffer();
+    if (audiobuf != NULL) {
+        platform_set_sd_callback(NULL, NULL);
+        FsFile audioFile = SD.open("valk.raw", O_RDONLY);
+        audioFile.seek(audioPos);
+        audioFile.read(audiobuf, AUDIO_BUFFER_SIZE);
+        audioFile.close();
+        audioPos += AUDIO_BUFFER_SIZE;
+        if(audioPos >= 59768832) audioPos = 0;
+        audio_buffer_filled();
+    }
+#endif
 }
 
 /*****************************************/
