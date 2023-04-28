@@ -27,7 +27,7 @@
 #include <ZuluSCSI_platform.h>
 
 // Use variables for version number
-#define FW_VER_NUM      "23.04.12"
+#define FW_VER_NUM      "23.04.26"
 #define FW_VER_SUFFIX   "devel"
 #define ZULU_FW_VERSION FW_VER_NUM "-" FW_VER_SUFFIX
 
@@ -35,6 +35,9 @@
 #define CONFIGFILE  "zuluscsi.ini"
 #define LOGFILE     "zululog.txt"
 #define CRASHFILE   "zuluerr.txt"
+
+// Prefix for command file to create new image (case-insensitive)
+#define CREATEFILE "create"
 
 // Log buffer size in bytes, must be a power of 2
 #ifndef LOGBUFSIZE
