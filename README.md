@@ -65,19 +65,19 @@ Any IO requests issued when card is removed will be timeouted.
 
 Programming & bootloader
 ------------------------
-There is a bootloader that loads new firmware from SD card on boot.
-The firmware file must be e.g. `ZuluSCSI.bin` or `ZuluSCSIv1_0_2022-xxxxx.bin`.
-Firmware update takes about 1 second, during which the LED will flash rapidly.
+For RP2040-based boards, the USB programming uses `.uf2` format file that can be copied to the virtual USB drive that shows up in bootloader mode.
 
-When successful, the bootloader removes the update file and continues to main firmware.
-On failure, `Zuluerr.txt` is written on the SD card.
+- There is a custom bootloader that loads new firmware from SD card on boot.
+- The firmware file must be e.g. `ZuluSCSI.bin` or `ZuluSCSIv1_0_2022-xxxxx.bin`.
+- Firmware update takes about 1 second, during which the LED will flash rapidly.
+- When successful, the bootloader removes the update file and continues to main firmware.
 
-Alternatively, the board can be programmed using USB connection in DFU mode by setting DIP switch 4.
-The necessary programmer utility for Windows can be downloaded from [GD32 website](http://www.gd32mcu.com/en/download?kw=dfu&lan=en). On Linux and MacOS, the standard 'dfu-util' can be used. It can be installed via your package manager under Linux. On MacOS, it is available through MacPorts and Brew as a package.
+For ZuluSCSI V1.1:
 
-`dfu-util --alt 0 --dfuse-address 0x08000000 --download ZuluSCSIv1_1_XXXXXX.bin`
+- Alternatively, ZuluSCSI V1.x can be programmed using USB connection in DFU mode by setting DIP switch 4.
+- The necessary programmer utility for Windows can be downloaded from [GD32 website](http://www.gd32mcu.com/en/download?kw=dfu&lan=en). On Linux and MacOS, the standard 'dfu-util' can be used. It can be installed via your package manager under Linux. On MacOS, it is available through MacPorts and Brew as a package.
+- `dfu-util --alt 0 --dfuse-address 0x08000000 --download ZuluSCSIv1_1_XXXXXX.bin`
 
-For RP2040-based boards, the USB programming uses `.uf2` format file that can be copied to the USB drive that shows up in bootloader mode.
 
 DIP switches
 ------------
@@ -167,7 +167,7 @@ Main program structure:
 Major changes from BlueSCSI and SCSI2SD include:
 
 * Separation of platform-specific functionality to separate directory to ease porting.
-* Ported to GD32F205.
+* Originally ported to GD32F205 and then RP2040 (See commit [858620f](https://github.com/ZuluSCSI/ZuluSCSI-firmware/commit/858620f2855d29fbd5b3f905972523b4fe65fdea)).
 * Removal of Arduino core dependency, as it was not currently available for GD32F205.
 * Buffered log functions.
 * Simultaneous transfer between SD card and SCSI for improved performance.
