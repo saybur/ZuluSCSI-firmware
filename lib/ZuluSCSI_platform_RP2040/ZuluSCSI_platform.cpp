@@ -576,8 +576,6 @@ static void watchdog_callback(unsigned alarm_num)
     hardware_alarm_set_target(3, delayed_by_ms(get_absolute_time(), 1000));
 }
 
-static uint32_t audioPos = 0;
-
 // This function can be used to periodically reset watchdog timer for crash handling.
 // It can also be left empty if the platform does not use a watchdog timer.
 void platform_reset_watchdog()
@@ -605,18 +603,7 @@ void platform_poll()
     adc_poll();
     
 #ifdef ENABLE_AUDIO_OUTPUT
-    // misuse this platform call to read audio data, if needed
-    uint8_t* audiobuf = audio_buffer();
-    if (audiobuf != NULL) {
-        platform_set_sd_callback(NULL, NULL);
-        FsFile audioFile = SD.open("valk.raw", O_RDONLY);
-        audioFile.seek(audioPos);
-        audioFile.read(audiobuf, AUDIO_BUFFER_SIZE);
-        audioFile.close();
-        audioPos += AUDIO_BUFFER_SIZE;
-        if(audioPos >= 59768832) audioPos = 0;
-        audio_buffer_filled();
-    }
+    audio_poll();
 #endif
 }
 

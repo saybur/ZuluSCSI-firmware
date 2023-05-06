@@ -17,6 +17,7 @@
 
 #ifdef ENABLE_AUDIO_OUTPUT
 
+#include <SdFat.h>
 #include <stdbool.h>
 #include <hardware/dma.h>
 #include <hardware/irq.h>
@@ -25,6 +26,8 @@
 #include "audio.h"
 #include "ZuluSCSI_log.h"
 #include "ZuluSCSI_platform.h"
+
+extern SdFs SD;
 
 // Table with the number of '1' bits for each index.
 // Used for SP/DIF parity calculations.
@@ -318,7 +321,7 @@ void audio_setup() {
 }
 
 static bool running = false;
-uint8_t* audio_buffer() {
+static uint8_t* audio_buffer() {
     if (!running && abufst == READY && bbufst == READY) {
         dma_channel_start(SOUND_DMA_CHA);
         running = true;
@@ -335,11 +338,26 @@ uint8_t* audio_buffer() {
     }
 }
 
-void audio_buffer_filled() {
+static void audio_buffer_filled() {
     if (abufst == FILLING) {
         abufst = READY;
     } else if (bbufst == FILLING) {
         bbufst = READY;
+    }
+}
+
+static uint32_t audioPos = 0;
+void audio_poll() {
+    uint8_t* audiobuf = audio_buffer();
+    if (audiobuf != NULL) {
+        platform_set_sd_callback(NULL, NULL);
+        FsFile audioFile = SD.open("valk.raw", O_RDONLY);
+        audioFile.seek(audioPos);
+        audioFile.read(audiobuf, AUDIO_BUFFER_SIZE);
+        audioFile.close();
+        audioPos += AUDIO_BUFFER_SIZE;
+        if(audioPos >= 59768832) audioPos = 0;
+        audio_buffer_filled();
     }
 }
 

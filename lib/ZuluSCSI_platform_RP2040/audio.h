@@ -40,10 +40,7 @@ void audio_setup();
 // function if its mask is not matched.
 void audio_dma_irq();
 
-// if non-null, indicates a buffer that should be filled
-uint8_t* audio_buffer();
-
-// callback after the above buffer has been filled
-void audio_buffer_filled();
+// called from platform_poll() to fill sample buffer(s) if needed
+void audio_poll();
 
 #endif // ENABLE_AUDIO_OUTPUT
