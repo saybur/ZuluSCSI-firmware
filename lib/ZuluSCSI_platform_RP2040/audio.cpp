@@ -113,20 +113,19 @@ static dma_channel_config snd_dma_b_cfg;
 static uint8_t sample_buf_a[AUDIO_BUFFER_SIZE];
 static uint8_t sample_buf_b[AUDIO_BUFFER_SIZE];
 
-// buffers for storing biphase patterns
-#define SAMPLE_CHUNK_SIZE 1024
-#define WIRE_BUFFER_SIZE (SAMPLE_CHUNK_SIZE * 2)
-static uint16_t wire_buf_a[WIRE_BUFFER_SIZE];
-static uint16_t wire_buf_b[WIRE_BUFFER_SIZE];
-
 // tracking for the state of the above buffers
-// first two are shared between cores, second two are Core1 only
 enum bufstate { STALE, FILLING, READY };
-static volatile bufstate abufst = STALE;
-static volatile bufstate bbufst = STALE;
+static volatile bufstate sbufst_a = STALE;
+static volatile bufstate sbufst_b = STALE;
 enum bufselect { A, B };
 static bufselect sbufsel = A;
 static uint16_t sbufpos = 0;
+
+// buffers for storing biphase patterns
+#define SAMPLE_CHUNK_SIZE 1024 // ~5.8ms
+#define WIRE_BUFFER_SIZE (SAMPLE_CHUNK_SIZE * 2)
+static uint16_t wire_buf_a[WIRE_BUFFER_SIZE];
+static uint16_t wire_buf_b[WIRE_BUFFER_SIZE];
 
 // trackers for the below function call
 static uint16_t sfcnt = 0; // sub-frame count; 2 per frame, 192 frames/block
@@ -145,22 +144,17 @@ static uint8_t invert = 0; // biphase encode help: set if last wire bit was '1'
 static void snd_encode(uint8_t* samples, uint16_t* wire_patterns, uint16_t len) {
     uint16_t widx = 0;
     for (uint16_t i = 0; i < len; i += 2) {
-        uint32_t sample = samples[i] + (samples[i + 1] << 8);
-        // determine parity, simplified to one lookup via an XOR
-        uint8_t parity = (sample >> 8) ^ sample;
-        parity = snd_parity[parity];
-
-        /*
-        * Shift sample into the correct bit positions of the sub-frame. This
-        * would normally be << 12, but with my DACs I've had persistent issues
-        * with signal clipping when sending data in the highest bit position.
-        */
-        sample = sample << 11;
-        if (sample & 0x04000000) {
-            // restore "negative sign"
-            sample |= 0x08000000;
-            parity++;
+        uint32_t sample = 0;
+        uint8_t parity = 0;
+        if (samples != NULL) {
+            sample = samples[i] + (samples[i + 1] << 8);
+            // determine parity, simplified to one lookup via an XOR
+            parity = (sample >> 8) ^ sample;
+            parity = snd_parity[parity];
         }
+
+        // shift sample into the correct bit positions of the sub-frame.
+        sample = sample << 12;
 
         // if needed, establish even parity with P bit
         if (parity % 2) sample |= 0x80000000;
@@ -203,40 +197,56 @@ static void snd_encode(uint8_t* samples, uint16_t* wire_patterns, uint16_t len) 
 // functions for passing to Core1
 static void snd_process_a() {
     if (sbufsel == A) {
-        snd_encode(sample_buf_a + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE);
-        sbufpos += SAMPLE_CHUNK_SIZE;
-        if (sbufpos >= AUDIO_BUFFER_SIZE) {
-            sbufsel = B;
-            sbufpos = 0;
-            abufst = STALE;
+        if (sbufst_a == READY) {
+            snd_encode(sample_buf_a + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE);
+            sbufpos += SAMPLE_CHUNK_SIZE;
+            if (sbufpos >= AUDIO_BUFFER_SIZE) {
+                sbufsel = B;
+                sbufpos = 0;
+                sbufst_a = STALE;
+            }
+        } else {
+            snd_encode(NULL, wire_buf_a, SAMPLE_CHUNK_SIZE);
         }
     } else {
-        snd_encode(sample_buf_b + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE);
-        sbufpos += SAMPLE_CHUNK_SIZE;
-        if (sbufpos >= AUDIO_BUFFER_SIZE) {
-            sbufsel = A;
-            sbufpos = 0;
-            bbufst = STALE;
+        if (sbufst_b == READY) {
+            snd_encode(sample_buf_b + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE);
+            sbufpos += SAMPLE_CHUNK_SIZE;
+            if (sbufpos >= AUDIO_BUFFER_SIZE) {
+                sbufsel = A;
+                sbufpos = 0;
+                sbufst_b = STALE;
+            }
+        } else {
+            snd_encode(NULL, wire_buf_a, SAMPLE_CHUNK_SIZE);
         }
     }
 }
 static void snd_process_b() {
     // clone of above for the other wire buffer
     if (sbufsel == A) {
-        snd_encode(sample_buf_a + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE);
-        sbufpos += SAMPLE_CHUNK_SIZE;
-        if (sbufpos >= AUDIO_BUFFER_SIZE) {
-            sbufsel = B;
-            sbufpos = 0;
-            abufst = STALE;
+        if (sbufst_a == READY) {
+            snd_encode(sample_buf_a + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE);
+            sbufpos += SAMPLE_CHUNK_SIZE;
+            if (sbufpos >= AUDIO_BUFFER_SIZE) {
+                sbufsel = B;
+                sbufpos = 0;
+                sbufst_a = STALE;
+            }
+        } else {
+            snd_encode(NULL, wire_buf_b, SAMPLE_CHUNK_SIZE);
         }
     } else {
-        snd_encode(sample_buf_b + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE);
-        sbufpos += SAMPLE_CHUNK_SIZE;
-        if (sbufpos >= AUDIO_BUFFER_SIZE) {
-            sbufsel = A;
-            sbufpos = 0;
-            bbufst = STALE;
+        if (sbufst_b == READY) {
+            snd_encode(sample_buf_b + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE);
+            sbufpos += SAMPLE_CHUNK_SIZE;
+            if (sbufpos >= AUDIO_BUFFER_SIZE) {
+                sbufsel = A;
+                sbufpos = 0;
+                sbufst_b = STALE;
+            }
+        } else {
+            snd_encode(NULL, wire_buf_b, SAMPLE_CHUNK_SIZE);
         }
     }
 }
@@ -259,7 +269,7 @@ static void core1_handler() {
 // a stall occurs... however, if that happens debugging it will be
 // a PITA, so potentially consider a different approach
 void audio_dma_irq() {
-    if (dma_hw->ints0 & (1 << SOUND_DMA_CHA)) {
+    if (dma_hw->intr & (1 << SOUND_DMA_CHA)) {
         dma_hw->ints0 = (1 << SOUND_DMA_CHA);
         multicore_fifo_push_blocking((uintptr_t) &snd_process_a);
         dma_channel_configure(SOUND_DMA_CHA,
@@ -268,7 +278,7 @@ void audio_dma_irq() {
                 &wire_buf_a,
                 WIRE_BUFFER_SIZE,
                 false);
-    } else if (dma_hw->ints0 & (1 << SOUND_DMA_CHB)) {
+    } else if (dma_hw->intr & (1 << SOUND_DMA_CHB)) {
         dma_hw->ints0 = (1 << SOUND_DMA_CHB);
         multicore_fifo_push_blocking((uintptr_t) &snd_process_b);
         dma_channel_configure(SOUND_DMA_CHB,
@@ -282,16 +292,11 @@ void audio_dma_irq() {
 
 void audio_setup() {
     // setup SPI to blast SP/DIF data over the TX pin
-    // --- TODO REMOVE THESE
-    // --- I don't think they are technically necessary
-    reset_block(RESETS_RESET_SPI1_BITS);
-    unreset_block_wait(RESETS_RESET_SPI1_BITS);
-
     spi_set_baudrate(AUDIO_SPI, 5644800); // will be slightly wrong, ~0.03% slow
     hw_write_masked(&spi_get_hw(AUDIO_SPI)->cr0,
             0x1F, // TI mode with 16 bits
             SPI_SSPCR0_DSS_BITS | SPI_SSPCR0_FRF_BITS);
-    hw_set_bits(&spi_get_hw(AUDIO_SPI)->dmacr, SPI_SSPDMACR_TXDMAE_BITS | SPI_SSPDMACR_RXDMAE_BITS);
+    spi_get_hw(AUDIO_SPI)->dmacr = SPI_SSPDMACR_TXDMAE_BITS;
     hw_set_bits(&spi_get_hw(AUDIO_SPI)->cr1, SPI_SSPCR1_SSE_BITS);
 
     dma_channel_claim(SOUND_DMA_CHA);
@@ -301,18 +306,21 @@ void audio_setup() {
     // there is no limiting or checking on these at present
 	snd_dma_a_cfg = dma_channel_get_default_config(SOUND_DMA_CHA);
 	channel_config_set_transfer_data_size(&snd_dma_a_cfg, DMA_SIZE_16);
-	channel_config_set_dreq(&snd_dma_a_cfg, spi_get_dreq(spi1, true));
+	channel_config_set_dreq(&snd_dma_a_cfg, spi_get_dreq(AUDIO_SPI, true));
 	channel_config_set_read_increment(&snd_dma_a_cfg, true);
 	channel_config_set_chain_to(&snd_dma_a_cfg, SOUND_DMA_CHB);
-	dma_channel_configure(SOUND_DMA_CHA, &snd_dma_a_cfg, &(spi_get_hw(spi1)->dr),
+    // version of pico-sdk lacks channel_config_set_high_priority()
+    snd_dma_a_cfg.ctrl |= DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS;
+	dma_channel_configure(SOUND_DMA_CHA, &snd_dma_a_cfg, &(spi_get_hw(AUDIO_SPI)->dr),
 			&wire_buf_a, WIRE_BUFFER_SIZE, false);
     dma_channel_set_irq0_enabled(SOUND_DMA_CHA, true);
 	snd_dma_b_cfg = dma_channel_get_default_config(SOUND_DMA_CHB);
 	channel_config_set_transfer_data_size(&snd_dma_b_cfg, DMA_SIZE_16);
-	channel_config_set_dreq(&snd_dma_b_cfg, spi_get_dreq(spi1, true));
+	channel_config_set_dreq(&snd_dma_b_cfg, spi_get_dreq(AUDIO_SPI, true));
 	channel_config_set_read_increment(&snd_dma_b_cfg, true);
 	channel_config_set_chain_to(&snd_dma_b_cfg, SOUND_DMA_CHA);
-	dma_channel_configure(SOUND_DMA_CHB, &snd_dma_b_cfg, &(spi_get_hw(spi1)->dr),
+    snd_dma_b_cfg.ctrl |= DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS;
+	dma_channel_configure(SOUND_DMA_CHB, &snd_dma_b_cfg, &(spi_get_hw(AUDIO_SPI)->dr),
 			&wire_buf_b, WIRE_BUFFER_SIZE, false);
     dma_channel_set_irq0_enabled(SOUND_DMA_CHB, true);
 
@@ -322,16 +330,16 @@ void audio_setup() {
 
 static bool running = false;
 static uint8_t* audio_buffer() {
-    if (!running && abufst == READY && bbufst == READY) {
+    if (!running && sbufst_a == READY && sbufst_b == READY) {
         dma_channel_start(SOUND_DMA_CHA);
         running = true;
     }
 
-    if (abufst == STALE) {
-        abufst = FILLING;
+    if (sbufst_a == STALE) {
+        sbufst_a = FILLING;
         return sample_buf_a;
-    } else if (bbufst == STALE) {
-        bbufst = FILLING;
+    } else if (sbufst_b == STALE) {
+        sbufst_b = FILLING;
         return sample_buf_b;
     } else {
         return NULL;
@@ -339,10 +347,10 @@ static uint8_t* audio_buffer() {
 }
 
 static void audio_buffer_filled() {
-    if (abufst == FILLING) {
-        abufst = READY;
-    } else if (bbufst == FILLING) {
-        bbufst = READY;
+    if (sbufst_a == FILLING) {
+        sbufst_a = READY;
+    } else if (sbufst_b == FILLING) {
+        sbufst_b = READY;
     }
 }
 

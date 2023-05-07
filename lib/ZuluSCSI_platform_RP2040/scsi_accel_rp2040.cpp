@@ -753,7 +753,7 @@ static void scsi_dma_irq()
     dma_hw->ints0 = (1 << SCSI_DMA_CH_A);
 #else
     // see audio.h for whats going on here
-    if (dma_hw->ints0 & (1 << SCSI_DMA_CH_A)) {
+    if (dma_hw->intr & (1 << SCSI_DMA_CH_A)) {
         dma_hw->ints0 = (1 << SCSI_DMA_CH_A);
     } else {
         audio_dma_irq();
