@@ -20,6 +20,10 @@
 
 #include <Arduino.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // audio subsystem DMA channels
 #define SOUND_DMA_CHA 6
 #define SOUND_DMA_CHB 7
@@ -27,6 +31,11 @@
 // size of the two audio sample buffers, in bytes
 // these must be divisible by 1024
 #define AUDIO_BUFFER_SIZE 8192 // ~46.44ms
+
+extern bool audio_active;
+// Tracker for determining if audio playback is occurring. This will be true
+// whenever the audio stream is active, including during pause events.
+static inline bool audio_is_active() { return audio_active; }
 
 // performs initial setup of the audio subsystem
 void audio_setup();
@@ -40,6 +49,26 @@ void audio_setup();
 void audio_dma_irq();
 
 // called from platform_poll() to fill sample buffer(s) if needed
-void audio_poll();
+bool audio_poll();
+
+/**
+ * Begins audio playback for a file.
+ *
+ * \param file   Path of a file containing PCM samples to play.
+ * \param start  Byte offset within file where playback will begin, inclusive.
+ * \param end    Byte offset within file where playback will end, exclusive.
+ * \param swap   If false, little-endian sample order, otherwise big-endian.
+ * \return       True if successful, false otherwise.
+ */
+bool audio_play(const char* file, uint64_t start, uint64_t end, bool swap);
+
+/**
+ * Stops audio playback.
+ */
+void audio_stop();
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // ENABLE_AUDIO_OUTPUT

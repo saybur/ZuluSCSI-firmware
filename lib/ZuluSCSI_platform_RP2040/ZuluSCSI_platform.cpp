@@ -307,7 +307,7 @@ void platform_late_init()
         gpio_conf(SCSI_IN_RST,    GPIO_FUNC_SIO, true, false, false, true, false);
 
 #ifdef ENABLE_AUDIO_OUTPUT
-        // one-time control setup for DMA channels, second core, yada yada
+        // one-time control setup for DMA channels and second core
         audio_setup();
 #endif
     }
@@ -474,6 +474,17 @@ static void adc_poll()
         initialized = true;
     }
 
+#ifdef ENABLE_AUDIO_OUTPUT
+    /*
+    * If ADC sample reads are done, either via direct reading, FIFO, or DMA,
+    * at the same time a SPI DMA write begins, it appears that the first
+    * 16-bit word of the DMA data is lost. This causes the bitstream to glitch
+    * and audio to 'pop' noticably. For now, just disable ADC reads when audio
+    * is playing.
+    */
+   if (audio_is_active()) return;
+#endif
+
     int adc_value_max = 0;
     while (!adc_fifo_is_empty())
     {
@@ -604,6 +615,10 @@ void platform_poll()
     
 #ifdef ENABLE_AUDIO_OUTPUT
     audio_poll();
+    // ---TEMP--- playback test file
+    if (!audio_is_active()) {
+        audio_play("220.raw", 0, 211680000, false);
+    }
 #endif
 }
 

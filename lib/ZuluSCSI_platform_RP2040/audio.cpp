@@ -24,8 +24,13 @@
 #include <hardware/spi.h>
 #include <pico/multicore.h>
 #include "audio.h"
+#include "ZuluSCSI_config.h"
 #include "ZuluSCSI_log.h"
 #include "ZuluSCSI_platform.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 extern SdFs SD;
 
@@ -120,12 +125,20 @@ static volatile bufstate sbufst_b = STALE;
 enum bufselect { A, B };
 static bufselect sbufsel = A;
 static uint16_t sbufpos = 0;
+static uint8_t sbufswap = 0;
 
 // buffers for storing biphase patterns
 #define SAMPLE_CHUNK_SIZE 1024 // ~5.8ms
 #define WIRE_BUFFER_SIZE (SAMPLE_CHUNK_SIZE * 2)
 static uint16_t wire_buf_a[WIRE_BUFFER_SIZE];
 static uint16_t wire_buf_b[WIRE_BUFFER_SIZE];
+
+// tracking for audio playback
+bool audio_active = false;
+static volatile bool audio_stopping = false;
+static char fpath[MAX_FILE_PATH + 1] = {0};
+static uint64_t fpos;
+static uint32_t fleft;
 
 // trackers for the below function call
 static uint16_t sfcnt = 0; // sub-frame count; 2 per frame, 192 frames/block
@@ -141,13 +154,17 @@ static uint8_t invert = 0; // biphase encode help: set if last wire bit was '1'
  * cores. It must also be called in the same order data is intended to be
  * output.
  */
-static void snd_encode(uint8_t* samples, uint16_t* wire_patterns, uint16_t len) {
+static void snd_encode(uint8_t* samples, uint16_t* wire_patterns, uint16_t len, uint8_t swap) {
     uint16_t widx = 0;
     for (uint16_t i = 0; i < len; i += 2) {
         uint32_t sample = 0;
         uint8_t parity = 0;
         if (samples != NULL) {
-            sample = samples[i] + (samples[i + 1] << 8);
+            if (swap) {
+                sample = samples[i + 1] + (samples[i] << 8);
+            } else {
+                sample = samples[i] + (samples[i + 1] << 8);
+            }
             // determine parity, simplified to one lookup via an XOR
             parity = (sample >> 8) ^ sample;
             parity = snd_parity[parity];
@@ -198,7 +215,7 @@ static void snd_encode(uint8_t* samples, uint16_t* wire_patterns, uint16_t len) 
 static void snd_process_a() {
     if (sbufsel == A) {
         if (sbufst_a == READY) {
-            snd_encode(sample_buf_a + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE);
+            snd_encode(sample_buf_a + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE, sbufswap);
             sbufpos += SAMPLE_CHUNK_SIZE;
             if (sbufpos >= AUDIO_BUFFER_SIZE) {
                 sbufsel = B;
@@ -206,11 +223,11 @@ static void snd_process_a() {
                 sbufst_a = STALE;
             }
         } else {
-            snd_encode(NULL, wire_buf_a, SAMPLE_CHUNK_SIZE);
+            snd_encode(NULL, wire_buf_a, SAMPLE_CHUNK_SIZE, sbufswap);
         }
     } else {
         if (sbufst_b == READY) {
-            snd_encode(sample_buf_b + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE);
+            snd_encode(sample_buf_b + sbufpos, wire_buf_a, SAMPLE_CHUNK_SIZE, sbufswap);
             sbufpos += SAMPLE_CHUNK_SIZE;
             if (sbufpos >= AUDIO_BUFFER_SIZE) {
                 sbufsel = A;
@@ -218,7 +235,7 @@ static void snd_process_a() {
                 sbufst_b = STALE;
             }
         } else {
-            snd_encode(NULL, wire_buf_a, SAMPLE_CHUNK_SIZE);
+            snd_encode(NULL, wire_buf_a, SAMPLE_CHUNK_SIZE, sbufswap);
         }
     }
 }
@@ -226,7 +243,7 @@ static void snd_process_b() {
     // clone of above for the other wire buffer
     if (sbufsel == A) {
         if (sbufst_a == READY) {
-            snd_encode(sample_buf_a + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE);
+            snd_encode(sample_buf_a + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE, sbufswap);
             sbufpos += SAMPLE_CHUNK_SIZE;
             if (sbufpos >= AUDIO_BUFFER_SIZE) {
                 sbufsel = B;
@@ -234,11 +251,11 @@ static void snd_process_b() {
                 sbufst_a = STALE;
             }
         } else {
-            snd_encode(NULL, wire_buf_b, SAMPLE_CHUNK_SIZE);
+            snd_encode(NULL, wire_buf_b, SAMPLE_CHUNK_SIZE, sbufswap);
         }
     } else {
         if (sbufst_b == READY) {
-            snd_encode(sample_buf_b + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE);
+            snd_encode(sample_buf_b + sbufpos, wire_buf_b, SAMPLE_CHUNK_SIZE, sbufswap);
             sbufpos += SAMPLE_CHUNK_SIZE;
             if (sbufpos >= AUDIO_BUFFER_SIZE) {
                 sbufsel = A;
@@ -246,7 +263,7 @@ static void snd_process_b() {
                 sbufst_b = STALE;
             }
         } else {
-            snd_encode(NULL, wire_buf_b, SAMPLE_CHUNK_SIZE);
+            snd_encode(NULL, wire_buf_b, SAMPLE_CHUNK_SIZE, sbufswap);
         }
     }
 }
@@ -272,6 +289,9 @@ void audio_dma_irq() {
     if (dma_hw->intr & (1 << SOUND_DMA_CHA)) {
         dma_hw->ints0 = (1 << SOUND_DMA_CHA);
         multicore_fifo_push_blocking((uintptr_t) &snd_process_a);
+        if (audio_stopping) {
+            channel_config_set_chain_to(&snd_dma_a_cfg, SOUND_DMA_CHA);
+        }
         dma_channel_configure(SOUND_DMA_CHA,
                 &snd_dma_a_cfg,
                 &(spi_get_hw(AUDIO_SPI)->dr),
@@ -281,6 +301,9 @@ void audio_dma_irq() {
     } else if (dma_hw->intr & (1 << SOUND_DMA_CHB)) {
         dma_hw->ints0 = (1 << SOUND_DMA_CHB);
         multicore_fifo_push_blocking((uintptr_t) &snd_process_b);
+        if (audio_stopping) {
+            channel_config_set_chain_to(&snd_dma_b_cfg, SOUND_DMA_CHB);
+        }
         dma_channel_configure(SOUND_DMA_CHB,
                 &snd_dma_b_cfg,
                 &(spi_get_hw(AUDIO_SPI)->dr),
@@ -302,8 +325,154 @@ void audio_setup() {
     dma_channel_claim(SOUND_DMA_CHA);
 	dma_channel_claim(SOUND_DMA_CHB);
 
-    // setup the two units to hand-off to each other
-    // there is no limiting or checking on these at present
+    logmsg("Starting Core1 for audio");
+    multicore_launch_core1(core1_handler);
+}
+
+bool audio_poll() {
+    if (!audio_active) return true;
+    if (fleft == 0 && sbufst_a == STALE && sbufst_b == STALE) {
+        // out of data and ready to stop
+        audio_stop();
+        return true;
+    } else if (fleft == 0) {
+        // out of data to read but still working on remainder
+        return true;
+    }
+
+    // are new audio samples needed from the memory card?
+    uint8_t* audiobuf;
+    if (sbufst_a == STALE) {
+        sbufst_a = FILLING;
+        audiobuf = sample_buf_a;
+    } else if (sbufst_b == STALE) {
+        sbufst_b = FILLING;
+        audiobuf = sample_buf_b;
+    } else {
+        // no data needed this time
+        return true;
+    }
+
+    platform_set_sd_callback(NULL, NULL);
+    FsFile audio_file = SD.open(fpath, O_RDONLY);
+    if (!audio_file) {
+        logmsg("Sample file (", fpath, ") failed to open in poll");
+        return false;
+    }
+    if (!audio_file.seek(fpos)) {
+        logmsg("Sample file (", fpath, ") failed seek to ", fpos);
+        audio_file.close();
+        return false;
+    }
+    uint16_t toRead = AUDIO_BUFFER_SIZE;
+    if (fleft < toRead) toRead = fleft;
+    if (audio_file.read(audiobuf, toRead) != toRead) {
+        logmsg("Sample file (", fpath, ") underrun");
+        audio_file.close();
+        return false;
+    }
+    audio_file.close();
+    fpos += toRead;
+    fleft -= toRead;
+
+    if (sbufst_a == FILLING) {
+        sbufst_a = READY;
+    } else if (sbufst_b == FILLING) {
+        sbufst_b = READY;
+    }
+    return true;
+}
+
+void audio_stop() {
+    // to help mute external hardware, send a bunch of '0' samples prior to
+    // halting the datastream; easiest way to do this is invalidating the
+    // sample buffers, same as if there was a sample data underrun
+    sbufst_a = STALE;
+    sbufst_b = STALE;
+
+    // then indicate that the streams should no longer chain to one another
+    // and wait for them to shut down naturally
+    audio_stopping = true;
+    while (dma_channel_is_busy(SOUND_DMA_CHA)) tight_loop_contents();
+    while (dma_channel_is_busy(SOUND_DMA_CHB)) tight_loop_contents();
+    while (spi_is_busy(AUDIO_SPI)) tight_loop_contents();
+    audio_stopping = false;
+
+    // idle the subsystem
+    audio_active = false;
+}
+
+bool audio_play(const char* file, uint64_t start, uint64_t end, bool swap) {
+    // stop any existing playback first
+    if (audio_active) audio_stop();
+
+    // dbgmsg("Request to play ('", file, "':", start, ":", end, ")");
+
+    // verify audio file is present and inputs are (somewhat) sane
+    if (start >= end) {
+        logmsg("Invalid range for audio (", start, ":", end, ")");
+        return false;
+    }
+    platform_set_sd_callback(NULL, NULL);
+    FsFile audio_file = SD.open(file, O_RDONLY);
+    if (!audio_file) {
+        logmsg("Unable to open file for audio playback: ", file);
+        return false;
+    }
+    uint64_t len = audio_file.size();
+    if (start > len || end > len) {
+        logmsg("File '", file, "' playback request (",
+                start, ":", end, ":", len, ") outside bounds");
+        audio_file.close();
+        return false;
+    }
+    fleft = end - start;
+    if (fleft <= 2 * AUDIO_BUFFER_SIZE) {
+        logmsg("File '", file, "' playback request (",
+                start, ":", end, ") too short");
+        audio_file.close();
+        return false;
+    }
+
+    // read in initial sample buffers
+    if (!audio_file.seek(start)) {
+        logmsg("Sample file (", file, ") failed start seek to ", start);
+        audio_file.close();
+        return false;
+    }
+    if (audio_file.read(sample_buf_a, AUDIO_BUFFER_SIZE) != AUDIO_BUFFER_SIZE) {
+        logmsg("File '", file, "' playback start returned fewer bytes than allowed");
+        audio_file.close();
+        return false;
+    }
+    if (audio_file.read(sample_buf_b, AUDIO_BUFFER_SIZE) != AUDIO_BUFFER_SIZE) {
+        logmsg("File '", file, "' playback start returned fewer bytes than allowed");
+        audio_file.close();
+        return false;
+    }
+    audio_file.close();
+
+    // prepare initial tracking state
+    strncpy(fpath, file, sizeof(fpath) - 1);
+    fpath[sizeof(fpath) - 1] = '\0';
+    fpos = start + AUDIO_BUFFER_SIZE * 2;
+    fleft -= AUDIO_BUFFER_SIZE * 2;
+    sbufsel = A;
+    sbufpos = 0;
+    sbufswap = swap;
+    sbufst_a = READY;
+    sbufst_b = READY;
+
+    // prepare the wire buffers
+    for (uint16_t i = 0; i < WIRE_BUFFER_SIZE; i++) {
+        wire_buf_a[i] = 0;
+        wire_buf_b[i] = 0;
+    }
+    sfcnt = 0;
+    invert = 0;
+
+    // setup the two DMA units to hand-off to each other
+    // to maintain a stable bitstream these need to run without interruption
 	snd_dma_a_cfg = dma_channel_get_default_config(SOUND_DMA_CHA);
 	channel_config_set_transfer_data_size(&snd_dma_a_cfg, DMA_SIZE_16);
 	channel_config_set_dreq(&snd_dma_a_cfg, spi_get_dreq(AUDIO_SPI, true));
@@ -324,49 +493,14 @@ void audio_setup() {
 			&wire_buf_b, WIRE_BUFFER_SIZE, false);
     dma_channel_set_irq0_enabled(SOUND_DMA_CHB, true);
 
-    logmsg("Starting Core1 for audio");
-    multicore_launch_core1(core1_handler);
+    // ready to go
+    dma_channel_start(SOUND_DMA_CHA);
+    audio_active = true;
+    return true;
 }
 
-static bool running = false;
-static uint8_t* audio_buffer() {
-    if (!running && sbufst_a == READY && sbufst_b == READY) {
-        dma_channel_start(SOUND_DMA_CHA);
-        running = true;
-    }
-
-    if (sbufst_a == STALE) {
-        sbufst_a = FILLING;
-        return sample_buf_a;
-    } else if (sbufst_b == STALE) {
-        sbufst_b = FILLING;
-        return sample_buf_b;
-    } else {
-        return NULL;
-    }
+#ifdef __cplusplus
 }
-
-static void audio_buffer_filled() {
-    if (sbufst_a == FILLING) {
-        sbufst_a = READY;
-    } else if (sbufst_b == FILLING) {
-        sbufst_b = READY;
-    }
-}
-
-static uint32_t audioPos = 0;
-void audio_poll() {
-    uint8_t* audiobuf = audio_buffer();
-    if (audiobuf != NULL) {
-        platform_set_sd_callback(NULL, NULL);
-        FsFile audioFile = SD.open("valk.raw", O_RDONLY);
-        audioFile.seek(audioPos);
-        audioFile.read(audiobuf, AUDIO_BUFFER_SIZE);
-        audioFile.close();
-        audioPos += AUDIO_BUFFER_SIZE;
-        if(audioPos >= 59768832) audioPos = 0;
-        audio_buffer_filled();
-    }
-}
+#endif
 
 #endif // ENABLE_AUDIO_OUTPUT
