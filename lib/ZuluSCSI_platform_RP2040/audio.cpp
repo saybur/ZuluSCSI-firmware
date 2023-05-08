@@ -167,10 +167,19 @@ static void snd_encode(uint8_t* samples, uint16_t* wire_patterns, uint16_t len, 
             // determine parity, simplified to one lookup via an XOR
             parity = (sample >> 8) ^ sample;
             parity = snd_parity[parity];
-        }
 
-        // shift sample into the correct bit positions of the sub-frame.
-        sample = sample << 12;
+            /*
+             * Shift sample into the correct bit positions of the sub-frame. This
+             * would normally be << 12, but with my DACs I've had persistent issues
+             * with signal clipping when sending data in the highest bit position.
+             */
+            sample = sample << 11;
+            if (sample & 0x04000000) {
+                // handle two's complement
+                sample |= 0x08000000;
+                parity++;
+            }
+        }
 
         // if needed, establish even parity with P bit
         if (parity % 2) sample |= 0x80000000;
