@@ -136,8 +136,7 @@ static uint16_t wire_buf_b[WIRE_BUFFER_SIZE];
 // tracking for audio playback
 bool audio_active = false;
 static volatile bool audio_stopping = false;
-static char fpath[MAX_FILE_PATH + 1] = {0};
-static uint64_t fpos;
+static FsFile audio_file;
 static uint32_t fleft;
 
 // trackers for the below function call
@@ -354,25 +353,11 @@ bool audio_poll() {
     }
 
     platform_set_sd_callback(NULL, NULL);
-    FsFile audio_file = SD.open(fpath, O_RDONLY);
-    if (!audio_file) {
-        logmsg("Sample file (", fpath, ") failed to open in poll");
-        return false;
-    }
-    if (!audio_file.seek(fpos)) {
-        logmsg("Sample file (", fpath, ") failed seek to ", fpos);
-        audio_file.close();
-        return false;
-    }
     uint16_t toRead = AUDIO_BUFFER_SIZE;
     if (fleft < toRead) toRead = fleft;
     if (audio_file.read(audiobuf, toRead) != toRead) {
-        logmsg("Sample file (", fpath, ") underrun");
-        audio_file.close();
-        return false;
+        logmsg("Audio sample data underrun");
     }
-    audio_file.close();
-    fpos += toRead;
     fleft -= toRead;
 
     if (sbufst_a == FILLING) {
@@ -384,6 +369,8 @@ bool audio_poll() {
 }
 
 void audio_stop() {
+    if (!audio_active) return;
+
     // to help mute external hardware, send a bunch of '0' samples prior to
     // halting the datastream; easiest way to do this is invalidating the
     // sample buffers, same as if there was a sample data underrun
@@ -399,6 +386,9 @@ void audio_stop() {
     audio_stopping = false;
 
     // idle the subsystem
+    if (audio_file.isOpen()) {
+        audio_file.close();
+    }
     audio_active = false;
 }
 
@@ -414,8 +404,8 @@ bool audio_play(const char* file, uint64_t start, uint64_t end, bool swap) {
         return false;
     }
     platform_set_sd_callback(NULL, NULL);
-    FsFile audio_file = SD.open(file, O_RDONLY);
-    if (!audio_file) {
+    audio_file = SD.open(file, O_RDONLY);
+    if (!audio_file.isOpen()) {
         logmsg("Unable to open file for audio playback: ", file);
         return false;
     }
@@ -450,12 +440,8 @@ bool audio_play(const char* file, uint64_t start, uint64_t end, bool swap) {
         audio_file.close();
         return false;
     }
-    audio_file.close();
 
     // prepare initial tracking state
-    strncpy(fpath, file, sizeof(fpath) - 1);
-    fpath[sizeof(fpath) - 1] = '\0';
-    fpos = start + AUDIO_BUFFER_SIZE * 2;
     fleft -= AUDIO_BUFFER_SIZE * 2;
     sbufsel = A;
     sbufpos = 0;
