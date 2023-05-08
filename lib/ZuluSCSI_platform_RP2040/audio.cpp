@@ -134,7 +134,7 @@ static uint16_t wire_buf_a[WIRE_BUFFER_SIZE];
 static uint16_t wire_buf_b[WIRE_BUFFER_SIZE];
 
 // tracking for audio playback
-bool audio_active = false;
+static bool audio_active = false;
 static volatile bool audio_stopping = false;
 static FsFile audio_file;
 static uint32_t fleft;
@@ -289,10 +289,6 @@ static void core1_handler() {
 /* ---------- VISIBLE FUNCTIONS ------------------------------------------- */
 /* ------------------------------------------------------------------------ */
 
-// interrupt handler for resetting DMA units
-// note use of blocking call, this shouldn't be an issue unless
-// a stall occurs... however, if that happens debugging it will be
-// a PITA, so potentially consider a different approach
 void audio_dma_irq() {
     if (dma_hw->intr & (1 << SOUND_DMA_CHA)) {
         dma_hw->ints0 = (1 << SOUND_DMA_CHA);
@@ -321,6 +317,10 @@ void audio_dma_irq() {
     }
 }
 
+bool audio_is_active() {
+    return audio_active;
+}
+
 void audio_setup() {
     // setup SPI to blast SP/DIF data over the TX pin
     spi_set_baudrate(AUDIO_SPI, 5644800); // will be slightly wrong, ~0.03% slow
@@ -337,15 +337,15 @@ void audio_setup() {
     multicore_launch_core1(core1_handler);
 }
 
-bool audio_poll() {
-    if (!audio_active) return true;
+void audio_poll() {
+    if (!audio_active) return;
     if (fleft == 0 && sbufst_a == STALE && sbufst_b == STALE) {
         // out of data and ready to stop
         audio_stop();
-        return true;
+        return;
     } else if (fleft == 0) {
         // out of data to read but still working on remainder
-        return true;
+        return;
     }
 
     // are new audio samples needed from the memory card?
@@ -358,7 +358,7 @@ bool audio_poll() {
         audiobuf = sample_buf_b;
     } else {
         // no data needed this time
-        return true;
+        return;
     }
 
     platform_set_sd_callback(NULL, NULL);
@@ -374,31 +374,6 @@ bool audio_poll() {
     } else if (sbufst_b == FILLING) {
         sbufst_b = READY;
     }
-    return true;
-}
-
-void audio_stop() {
-    if (!audio_active) return;
-
-    // to help mute external hardware, send a bunch of '0' samples prior to
-    // halting the datastream; easiest way to do this is invalidating the
-    // sample buffers, same as if there was a sample data underrun
-    sbufst_a = STALE;
-    sbufst_b = STALE;
-
-    // then indicate that the streams should no longer chain to one another
-    // and wait for them to shut down naturally
-    audio_stopping = true;
-    while (dma_channel_is_busy(SOUND_DMA_CHA)) tight_loop_contents();
-    while (dma_channel_is_busy(SOUND_DMA_CHB)) tight_loop_contents();
-    while (spi_is_busy(AUDIO_SPI)) tight_loop_contents();
-    audio_stopping = false;
-
-    // idle the subsystem
-    if (audio_file.isOpen()) {
-        audio_file.close();
-    }
-    audio_active = false;
 }
 
 bool audio_play(const char* file, uint64_t start, uint64_t end, bool swap) {
@@ -492,6 +467,30 @@ bool audio_play(const char* file, uint64_t start, uint64_t end, bool swap) {
     dma_channel_start(SOUND_DMA_CHA);
     audio_active = true;
     return true;
+}
+
+void audio_stop() {
+    if (!audio_active) return;
+
+    // to help mute external hardware, send a bunch of '0' samples prior to
+    // halting the datastream; easiest way to do this is invalidating the
+    // sample buffers, same as if there was a sample data underrun
+    sbufst_a = STALE;
+    sbufst_b = STALE;
+
+    // then indicate that the streams should no longer chain to one another
+    // and wait for them to shut down naturally
+    audio_stopping = true;
+    while (dma_channel_is_busy(SOUND_DMA_CHA)) tight_loop_contents();
+    while (dma_channel_is_busy(SOUND_DMA_CHB)) tight_loop_contents();
+    while (spi_is_busy(AUDIO_SPI)) tight_loop_contents();
+    audio_stopping = false;
+
+    // idle the subsystem
+    if (audio_file.isOpen()) {
+        audio_file.close();
+    }
+    audio_active = false;
 }
 
 #ifdef __cplusplus

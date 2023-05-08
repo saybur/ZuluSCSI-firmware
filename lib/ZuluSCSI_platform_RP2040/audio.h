@@ -32,24 +32,36 @@ extern "C" {
 // these must be divisible by 1024
 #define AUDIO_BUFFER_SIZE 8192 // ~46.44ms
 
-extern bool audio_active;
-// Tracker for determining if audio playback is occurring. This will be true
-// whenever the audio stream is active, including during pause events.
-static inline bool audio_is_active() { return audio_active; }
-
-// performs initial setup of the audio subsystem
-void audio_setup();
-
-// handler for DMA interrupts
-// This is called from scsi_dma_irq() in scsi_accel_rp2040; this is obviously
-// a silly way to handle things, but irq_add_shared_handler() causes a lockup,
-// likely due to pico-sdk issue #724 fixed in 1.3.1. This builds against 1.3.0
-// and thus still has the bug. To work around the problem the above exclusive
-// handler will delegate to this function if its mask is not matched.
+/**
+ * Handler for DMA interrupts
+ *
+ * This is called from scsi_dma_irq() in scsi_accel_rp2040.cpp. That is
+ * obviously a silly way to handle things. However, using
+ * irq_add_shared_handler() causes a lockup, likely due to pico-sdk issue #724
+ * fixed in 1.3.1. Current builds use pico-sdk 1.3.0 and are affected by
+ * the bug. To work around the problem the above exclusive handler
+ * delegates to this function if its normal mask is not matched.
+ */
 void audio_dma_irq();
 
-// called from platform_poll() to fill sample buffer(s) if needed
-bool audio_poll();
+/**
+ * Indicates if the audio subsystem is actively streaming, including if it is
+ * sending silent data during sample stall events.
+ *
+ * \return true if audio streaming is active, false otherwise.
+ */
+bool audio_is_active();
+
+/**
+ * Initializes the audio subsystem. Should be called only once, toward the end
+ * of platform_late_init().
+ */
+void audio_setup();
+
+/**
+ * Called from platform_poll() to fill sample buffer(s) if needed.
+ */
+void audio_poll();
 
 /**
  * Begins audio playback for a file.
