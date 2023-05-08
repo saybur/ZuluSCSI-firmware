@@ -615,10 +615,6 @@ void platform_poll()
     
 #ifdef ENABLE_AUDIO_OUTPUT
     audio_poll();
-    // ---TEMP--- playback test file
-    if (!audio_is_active()) {
-        audio_play("220.raw", 0, 211680000, false);
-    }
 #endif
 }
 
